@@ -29,29 +29,43 @@ func (a *Assistant) Title(ctx context.Context, conv *model.Conversation) (string
 
 	slog.InfoContext(ctx, "Generating title for conversation", "conversation_id", conv.ID)
 
-	msgs := make([]openai.ChatCompletionMessageParamUnion, len(conv.Messages))
-
-	msgs[0] = openai.AssistantMessage("Generate a concise, descriptive title for the conversation based on the user message. The title should be a single line, no more than 80 characters, and should not include any special characters or emojis.")
-	for i, m := range conv.Messages {
-		msgs[i] = openai.UserMessage(m.Content)
+	var firstUserMessage string
+	for _, m := range conv.Messages {
+		if m.Role == model.RoleUser && strings.TrimSpace(m.Content) != "" {
+			firstUserMessage = m.Content
+			break
+		}
 	}
+	if firstUserMessage == "" {
+		firstUserMessage = conv.Messages[0].Content
+	}
+
+	system := openai.SystemMessage(`You generate concise conversation titles.
+
+	Rules:
+	- Output ONLY a short noun phrase summarizing the user's first message.
+	- Do NOT answer the question.
+	- Do NOT include quotes.
+	- Maximum 6 words.`)
+
+	user := openai.UserMessage(firstUserMessage)
 
 	resp, err := a.cli.Chat.Completions.New(ctx, openai.ChatCompletionNewParams{
-		Model:    openai.ChatModelO1,
-		Messages: msgs,
+		Model:    openai.ChatModelGPT4_1,
+		Messages: []openai.ChatCompletionMessageParamUnion{system, user},
 	})
 
-	if err != nil {
-		return "", err
-	}
-
-	if len(resp.Choices) == 0 || strings.TrimSpace(resp.Choices[0].Message.Content) == "" {
-		return "", errors.New("empty response from OpenAI for title generation")
+	if err != nil || len(resp.Choices) == 0 {
+		return "New conversation", nil
 	}
 
 	title := resp.Choices[0].Message.Content
 	title = strings.ReplaceAll(title, "\n", " ")
 	title = strings.Trim(title, " \t\r\n-\"'")
+
+	if title == "" {
+		return "New conversation", nil
+	}
 
 	if len(title) > 80 {
 		title = title[:80]
