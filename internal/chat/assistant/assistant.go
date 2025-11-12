@@ -112,6 +112,10 @@ func (a *Assistant) Reply(ctx context.Context, conv *model.Conversation) (string
 							"location": map[string]string{
 								"type": "string",
 							},
+							"details": map[string]string{
+								"type":        "boolean",
+								"description": "If true, include detailed weather information (humidity, pressure, UV, etc.).",
+							},
 						},
 						"required": []string{"location"},
 					},
@@ -164,6 +168,7 @@ func (a *Assistant) Reply(ctx context.Context, conv *model.Conversation) (string
 				case "get_weather":
 					var args struct {
 						Location string `json:"location"`
+						Details  bool   `json:"details,omitempty"`
 					}
 					if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err != nil || strings.TrimSpace(args.Location) == "" {
 						msgs = append(msgs, openai.ToolMessage("failed to parse arguments for get_weather", call.ID))
@@ -172,16 +177,22 @@ func (a *Assistant) Reply(ctx context.Context, conv *model.Conversation) (string
 
 					rep, err := weather.GetCurrent(ctx, args.Location)
 					if err != nil {
-						slog.ErrorContext(ctx, "weather fetch failed", "error", err)
 						msgs = append(msgs, openai.ToolMessage("failed to fetch weather", call.ID))
 						break
 					}
 
 					var b strings.Builder
 					fmt.Fprintf(&b, "Location: %s\n", rep.ResolvedName)
-					fmt.Fprintf(&b, "Current: %.1f°C, wind %.1f km/h, %s\n", rep.TemperatureC, rep.WindKph, rep.Condition)
+					fmt.Fprintf(&b, "Current: %.1f°C (feels %.1f°C), %s\n", rep.TemperatureC, rep.FeelsLikeC, rep.Condition)
+					fmt.Fprintf(&b, "Wind: %.1f km/h %s\n", rep.WindKph, rep.WindDir)
+
+					if args.Details {
+						fmt.Fprintf(&b, "Humidity: %d%% | Cloud: %d%% | UV: %.1f\n", rep.Humidity, rep.Cloud, rep.UV)
+						fmt.Fprintf(&b, "Pressure: %.0f mb | Visibility: %.1f km | Precip: %.2f mm\n", rep.PressureMb, rep.VisKm, rep.PrecipMm)
+					}
 
 					msgs = append(msgs, openai.ToolMessage(b.String(), call.ID))
+
 
 				case "get_today_date":
 					msgs = append(msgs, openai.ToolMessage(time.Now().Format(time.RFC3339), call.ID))

@@ -13,12 +13,21 @@ import (
 )
 
 type CurrentReport struct {
-	ResolvedName string
-	Latitude     float64
-	Longitude    float64
-	TemperatureC float64
-	WindKph      float64
-	Condition    string
+    ResolvedName string
+    Latitude     float64
+    Longitude    float64
+    TemperatureC float64
+    WindKph      float64
+    WindDir      string
+    GustKph      float64
+    Humidity     int
+    FeelsLikeC   float64
+    PrecipMm     float64
+    PressureMb   float64
+    Cloud        int
+    UV           float64
+    VisKm        float64
+    Condition    string
 }
 
 var httpClient = &http.Client{Timeout: 8 * time.Second}
@@ -68,11 +77,20 @@ func GetCurrent(ctx context.Context, location string) (*CurrentReport, error) {
 			Lon     float64 `json:"lon"`
 		} `json:"location"`
 		Current struct {
-			TempC    float64 `json:"temp_c"`
-			WindKph  float64 `json:"wind_kph"`
-			Condition struct {
-				Text string `json:"text"`
-			} `json:"condition"`
+				TempC     float64 `json:"temp_c"`
+				WindKph   float64 `json:"wind_kph"`
+				WindDir   string  `json:"wind_dir"`
+				GustKph   float64 `json:"gust_kph"`
+				Humidity  int     `json:"humidity"`
+				FeelsLike float64 `json:"feelslike_c"`
+				PrecipMm  float64 `json:"precip_mm"`
+				Pressure  float64 `json:"pressure_mb"`
+				Cloud     int     `json:"cloud"`
+				UV        float64 `json:"uv"`
+				VisKm     float64 `json:"vis_km"`
+				Condition struct {
+					Text string `json:"text"`
+				} `json:"condition"`
 		} `json:"current"`
 	}
 
@@ -94,6 +112,15 @@ func GetCurrent(ctx context.Context, location string) (*CurrentReport, error) {
 		Longitude:    payload.Location.Lon,
 		TemperatureC: payload.Current.TempC,
 		WindKph:      payload.Current.WindKph,
+		WindDir:      payload.Current.WindDir,
+		GustKph:      payload.Current.GustKph,
+		Humidity:     payload.Current.Humidity,
+		FeelsLikeC:   payload.Current.FeelsLike,
+		PrecipMm:     payload.Current.PrecipMm,
+		PressureMb:   payload.Current.Pressure,
+		Cloud:        payload.Current.Cloud,
+		UV:           payload.Current.UV,
+		VisKm:        payload.Current.VisKm,
 		Condition:    payload.Current.Condition.Text,
 	}, nil
 }
