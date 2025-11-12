@@ -238,7 +238,7 @@ I first implemented the weather tool to get a reduced report, then I extended it
 
 #### 1. New weather package
 
-A new helper file [`internal/tools/weather.go`](internal/tools/weather.go) defines the GetCurrent function which interacts with WeatherAPI to get the weather report:
+A new helper file [`internal/tools/weather.go`](internal/tools/weather.go) defines the `GetCurrent` function which interacts with WeatherAPI to get the weather report:
 
 ```go
 func GetCurrent(ctx context.Context, location string) (*CurrentReport, error)
