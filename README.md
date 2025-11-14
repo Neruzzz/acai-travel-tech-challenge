@@ -226,7 +226,7 @@ Issues:
 Key design decisions:
 
 - Replace the placeholder with a real integration using the public WeatherAPI
-- Create a new package internal/tools/weather.go to encapsulate all HTTP calls, parsing, and error handling.
+- Create a new package [internal/tools/current_weather.go](internal/tools/current_weather.go) to encapsulate all HTTP calls, parsing, and error handling.
 - Fetch and return live weather data: temperature, wind, humidity, pressure, UV index, and precipitation.
 - Extend the tool’s JSON schema with a new details flag so the LLM can request compact or detailed output.
 - Support missing/invalid keys gracefully by returning a clear "failed to fetch weather" message.
@@ -269,7 +269,7 @@ type CurrentReport struct {
 }
 ```
 
-This isolates all WeatherAPI logic from the assistant core and makes it reusable for other tasks (like the forecast in the bonus task).
+This isolates all WeatherAPI logic from the assistant core and makes it reusable for other tasks.
 
 #### 2. Updated assistant logic
 
@@ -341,6 +341,304 @@ Let me know if you need a forecast or more details!
 
 ## Task 2 – Bonus: Weather forecast
 
+### Problem
+
+The assistant originally handled **only current weather**. Users requesting **tomorrow**, **weekend**, or **multi-day** forecasts received incomplete answers because there was no mechanism to fetch future weather (max/min temperatures, chance of rain, precipitation totals, UV index, sunrise/sunset, etc.).
+
+The system needed a clean way to request forecast data and a consistent output format matching the style of the current-weather tool.
+
+---
+
+### Solution
+
+Key design decisions:
+
+- Add a **new tool**, `get_forecast`, dedicated to multi-day forecast queries.
+- Use the same WeatherAPI backend, but through a new helper function `GetForecast`.
+- Support **1–7 days**. If the request is outside the range, clamp it to the valid bounds.
+- Support both:
+  - concise output (`details=false`)  
+  - enriched output (`details=true`)
+- Reuse the same formatting patterns used in the current-weather tool for consistency.
+
+This approach extends weather functionality without changing the behavior of the original `get_weather` tool.
+
+
+### Implementation
+
+The forecast logic is split in two main parts:
+
+
+#### 1. Forecast helper (`GetForecast`)
+
+**File:** `internal/tools/weather/weather_forecast.go`  
+**Function:** `GetForecast(ctx, location, days)`
+
+Responsibilities:
+
+- Make an HTTP call to:  
+  `https://api.weatherapi.com/v1/forecast.json`
+- Clamp the number of days to `[1..7]`.
+- Parse JSON cleanly into a Go struct rather than working with raw maps.
+- Return a slice of `DailyForecast` ready for formatting.
+
+Structure (report) definition:
+
+```go
+type DailyForecast struct {
+    Date          string
+    MaxTempC      float64
+    MinTempC      float64
+    Condition     string
+    ChanceOfRain  int
+    TotalPrecipMm float64
+    MaxWindKph    float64
+    UV            float64
+    Sunrise       string
+    Sunset        string
+}
+```
+Core logic:
+
+```go
+func GetForecast(ctx context.Context, location string, days int) ([]DailyForecast, error) {
+    apiKey := strings.TrimSpace(os.Getenv("WEATHER_API_KEY"))
+    if apiKey == "" {
+        return nil, errors.New("missing WEATHER_API_KEY")
+    }
+    if strings.TrimSpace(location) == "" {
+        return nil, errors.New("empty location")
+    }
+
+    if days <= 0 { days = 3 }
+    if days > 7 { days = 7 }
+
+    endpoint := fmt.Sprintf(
+        "https://api.weatherapi.com/v1/forecast.json?key=%s&q=%s&days=%d&aqi=no&alerts=no",
+        url.QueryEscape(apiKey),
+        url.QueryEscape(location),
+        days,
+    )
+
+    req, _ := http.NewRequestWithContext(ctx, "GET", endpoint, nil)
+    res, err := httpClientForecast.Do(req)
+    if err != nil {
+        return nil, err
+    }
+    defer res.Body.Close()
+
+    if res.StatusCode >= 400 {
+        var e struct {
+            Error struct {
+                Code    int    `json:"code"`
+                Message string `json:"message"`
+            } `json:"error"`
+        }
+        _ = json.NewDecoder(res.Body).Decode(&e)
+        if e.Error.Message != "" {
+            return nil, fmt.Errorf("weatherapi error: %s (code %d)", e.Error.Message, e.Error.Code)
+        }
+        return nil, fmt.Errorf("weatherapi http %d", res.StatusCode)
+    }
+
+    // parse JSON...
+}
+
+```
+
+The function returns a slice of `DailyForecast` containing all relevant fields.
+
+#### 2. The new `get_forecast` tool in `assistant.go`
+
+The tool is defined in the same format as the existing tools in the assistant:
+
+```go
+openai.ChatCompletionFunctionTool(openai.FunctionDefinitionParam{
+    Name:        "get_forecast",
+    Description: openai.String("Get daily weather forecast for the next N days at a given location."),
+    Parameters: openai.FunctionParameters{
+        "type": "object",
+        "properties": map[string]any{
+            "location": map[string]string{"type": "string"},
+            "days": map[string]any{
+                "type": "integer", "minimum": 1, "maximum": 7,
+                "description": "How many days ahead (1–7). Defaults to 3.",
+            },
+            "details": map[string]string{
+                "type":        "boolean",
+                "description": "If true, include precip totals, UV, wind, sunrise/sunset.",
+            },
+        },
+        "required": []string{"location"},
+    },
+})
+```
+
+#### 3. Handling the tool call in assistant.go
+
+When the model calls `get_forecast`, the assistant parses the input, fetches the forecast and finally formats the output:
+
+```go
+case "get_forecast":
+    var args struct {
+        Location string `json:"location"`
+        Days     int    `json:"days,omitempty"`
+        Details  bool   `json:"details,omitempty"`
+    }
+    if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err != nil || strings.TrimSpace(args.Location) == "" {
+        msgs = append(msgs, openai.ToolMessage("failed to parse arguments for get_forecast", call.ID))
+        break
+    }
+
+    df, err := weather.GetForecast(ctx, args.Location, args.Days)
+    if err != nil {
+        msgs = append(msgs, openai.ToolMessage("failed to fetch forecast", call.ID))
+        break
+    }
+
+    var b strings.Builder
+    fmt.Fprintf(&b, "Forecast for %s:\n", args.Location)
+    for _, d := range df {
+        if args.Details {
+            fmt.Fprintf(&b, "- %s: %s, %.0f/%.0f°C, rain %d%%, precip %.1f mm, wind %.0f km/h, UV %.1f, sunrise %s, sunset %s\n",
+                d.Date, d.Condition, d.MaxTempC, d.MinTempC, d.ChanceOfRain, d.TotalPrecipMm, d.MaxWindKph, d.UV, d.Sunrise, d.Sunset)
+        } else {
+            fmt.Fprintf(&b, "- %s: %s, %.0f/%.0f°C, rain %d%%\n",
+                d.Date, d.Condition, d.MaxTempC, d.MinTempC, d.ChanceOfRain)
+        }
+    }
+    msgs = append(msgs, openai.ToolMessage(b.String(), call.ID))
+
+```
+
+### Result
+
+Here are several examples of the implemented tool working:
+
+```text
+Starting a new conversation, type your message below.
+
+USER:
+Give me the weather for this week in Barcelona 
+
+New conversation started:
+ID: 6915fde7984742ca45cf088f
+Title: Barcelona weekly weather forecast
+
+ASSISTANT:
+Here is the weather forecast for Barcelona this week:
+
+- Nov 13: Patchy rain, 20/17°C, very little rain
+- Nov 14: Patchy rain, 21/17°C, likely rain (3.5 mm)
+- Nov 15: Patchy rain, 20/16°C, some rain (0.8 mm)
+- Nov 16: Patchy rain, 19/17°C, likely rain (4.2 mm)
+- Nov 17: Patchy rain, 18/14°C, light rain
+- Nov 18: Patchy rain, 15/13°C, almost dry
+- Nov 19: Partly cloudy, 12/11°C, dry
+
+Expect mild temperatures with frequent chances of rain, especially midweek. The weather will improve toward the end of the week.
+
+USER:
+I want it will all the details you can give me
+
+ASSISTANT:
+Here’s a detailed 7-day weather forecast for Barcelona:
+
+November 13
+- Weather: Patchy rain nearby
+- Temperatures: High 20°C / Low 17°C
+- Precipitation: 0.1 mm (Rain chance: 0%)
+- Wind: 24 km/h
+- UV Index: 0.4 (Low)
+- Sunrise: 07:38 AM / Sunset: 05:34 PM
+
+November 14
+- Weather: Patchy rain nearby
+- Temperatures: 21°C / 17°C
+- Precipitation: 3.5 mm (Rain chance: 87%)
+- Wind: 27 km/h
+- UV Index: 0.3 (Low)
+- Sunrise: 07:39 AM / Sunset: 05:33 PM
+
+November 15
+- Weather: Patchy rain nearby
+- Temperatures: 20°C / 16°C
+- Precipitation: 0.8 mm (Rain chance: 86%)
+- Wind: 27 km/h
+- UV Index: 0.4 (Low)
+- Sunrise: 07:40 AM / Sunset: 05:32 PM
+
+November 16
+- Weather: Patchy rain nearby
+- Temperatures: 19°C / 17°C
+- Precipitation: 4.2 mm (Rain chance: 89%)
+- Wind: 21 km/h
+- UV Index: 0.4 (Low)
+- Sunrise: 07:41 AM / Sunset: 05:31 PM
+
+November 17
+- Weather: Patchy rain nearby
+- Temperatures: 18°C / 14°C
+- Precipitation: 0.3 mm (Rain chance: 81%)
+- Wind: 13 km/h
+- UV Index: 0.4 (Low)
+- Sunrise: 07:42 AM / Sunset: 05:30 PM
+
+November 18
+- Weather: Patchy rain nearby
+- Temperatures: 15°C / 13°C
+- Precipitation: 0.1 mm (Rain chance: 0%)
+- Wind: 13 km/h
+- UV Index: 3.0 (Moderate)
+- Sunrise: 07:44 AM / Sunset: 05:29 PM
+
+November 19
+- Weather: Partly Cloudy
+- Temperatures: 12°C / 11°C
+- Precipitation: 0.0 mm (Rain chance: 0%)
+- Wind: 13 km/h
+- UV Index: 4.0 (Moderate)
+- Sunrise: 07:45 AM / Sunset: 05:29 PM
+
+Expect mild to cool temperatures, mostly cloudy skies, and several days of rain early in the week. The weather will dry out and clear up somewhat toward the end of the week.
+```
+
+If asked for a determined number of days:
+
+```text
+USER:
+And the weather in Bangkok for the next 3 days?    
+
+ASSISTANT:
+Here’s the detailed weather forecast for Bangkok for the next 3 days:
+
+November 13
+- Weather: Heavy rain
+- Temperatures: High 30°C / Low 26°C
+- Precipitation: 21.5 mm (rain chance: 97%)
+- Wind: 9 km/h
+- UV Index: 1.7 (Low)
+- Sunrise: 06:17 AM / Sunset: 05:48 PM
+
+November 14
+- Weather: Moderate rain
+- Temperatures: 29°C / 25°C
+- Precipitation: 12.4 mm (rain chance: 93%)
+- Wind: 9 km/h
+- UV Index: 1.8 (Low)
+- Sunrise: 06:17 AM / Sunset: 05:48 PM
+
+November 15
+- Weather: Sunny
+- Temperatures: 30°C / 23°C
+- Precipitation: 0.0 mm (rain chance: 0%)
+- Wind: 13 km/h
+- UV Index: 1.9 (Low)
+- Sunrise: 06:17 AM / Sunset: 05:48 PM
+
+Expect rain the next two days, with improving weather and sunshine on the third day.
+```
+
 ## Task 3
 
 
@@ -352,5 +650,6 @@ Let me know if you need a forecast or more details!
 
 
 ## References
-- ChatGPT 5 for coding and syntax
+- ChatGPT 5 for coding and syntax.
 - WeatherAPI Documentation: https://www.weatherapi.com/docs/
+- For deeper understanding of syntax and primitives in Go: https://go.dev/doc/

@@ -4,14 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"strings"
 	"time"
-	"fmt"
 
 	"github.com/acai-travel/tech-challenge/internal/chat/model"
-	"github.com/acai-travel/tech-challenge/internal/tools"
+	weather "github.com/acai-travel/tech-challenge/internal/tools"
 
 	ics "github.com/arran4/golang-ical"
 	"github.com/openai/openai-go/v2"
@@ -122,6 +122,26 @@ func (a *Assistant) Reply(ctx context.Context, conv *model.Conversation) (string
 				}),
 
 				openai.ChatCompletionFunctionTool(openai.FunctionDefinitionParam{
+					Name:        "get_forecast",
+					Description: openai.String("Get daily weather forecast for the next N days at a given location."),
+					Parameters: openai.FunctionParameters{
+						"type": "object",
+						"properties": map[string]any{
+							"location": map[string]string{"type": "string"},
+							"days": map[string]any{
+								"type": "integer", "minimum": 1, "maximum": 7,
+								"description": "How many days ahead (1–7). Defaults to 3.",
+							},
+							"details": map[string]string{
+								"type":        "boolean",
+								"description": "If true, include extra fields like precip totals, UV, wind, sunrise/sunset.",
+							},
+						},
+						"required": []string{"location"},
+					},
+				}),
+
+				openai.ChatCompletionFunctionTool(openai.FunctionDefinitionParam{
 					Name:        "get_today_date",
 					Description: openai.String("Get today's date and time in RFC3339 format"),
 				}),
@@ -193,10 +213,39 @@ func (a *Assistant) Reply(ctx context.Context, conv *model.Conversation) (string
 
 					msgs = append(msgs, openai.ToolMessage(b.String(), call.ID))
 
+				case "get_forecast":
+					var args struct {
+						Location string `json:"location"`
+						Days     int    `json:"days,omitempty"`
+						Details  bool   `json:"details,omitempty"`
+					}
+					if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err != nil || strings.TrimSpace(args.Location) == "" {
+						msgs = append(msgs, openai.ToolMessage("failed to parse arguments for get_forecast", call.ID))
+						break
+					}
+
+					df, err := weather.GetForecast(ctx, args.Location, args.Days)
+					if err != nil {
+						msgs = append(msgs, openai.ToolMessage("failed to fetch forecast", call.ID))
+						break
+					}
+
+					var b strings.Builder
+					fmt.Fprintf(&b, "Forecast for %s:\n", args.Location)
+					for _, d := range df {
+						if args.Details {
+							fmt.Fprintf(&b, "- %s: %s, %.0f/%.0f°C, rain %d%%, precip %.1f mm, wind %.0f km/h, UV %.1f, sunrise %s, sunset %s\n",
+								d.Date, d.Condition, d.MaxTempC, d.MinTempC, d.ChanceOfRain, d.TotalPrecipMm, d.MaxWindKph, d.UV, d.Sunrise, d.Sunset)
+						} else {
+							fmt.Fprintf(&b, "- %s: %s, %.0f/%.0f°C, rain %d%%\n",
+								d.Date, d.Condition, d.MaxTempC, d.MinTempC, d.ChanceOfRain)
+						}
+					}
+					msgs = append(msgs, openai.ToolMessage(b.String(), call.ID))
 
 				case "get_today_date":
 					msgs = append(msgs, openai.ToolMessage(time.Now().Format(time.RFC3339), call.ID))
-					
+
 				case "get_holidays":
 					link := "https://www.officeholidays.com/ics/spain/catalonia"
 					if v := os.Getenv("HOLIDAY_CALENDAR_LINK"); v != "" {
