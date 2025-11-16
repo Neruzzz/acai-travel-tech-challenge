@@ -885,6 +885,127 @@ After the refactor:
 - The assistant’s logic is cleaner, more robust, and easier to extend.
 - Adding a new capability now takes one new file + one `init()` line, without touching any shared logic.
 
+
+## Task 3 – Bonus: Implement an extra tool. Exchange rates tool.
+
+### Problem
+
+The project required the implementation of a new, independent tool to demonstrate the extensibility of the tool registry system. The new tool:
+
+- Is useful in conversational contexts (e.g., travel-related questions).
+- Relies on a real external API.
+- Works without any API keys to ensure reproducibility and easy setup.
+
+### Solution
+
+A new tool named `get_exchange_rate` was created.
+It retrieves the latest currency exchange rate or performs a direct conversion between two currencies using the `frankfurter.app` API.
+
+Key design decisions:
+
+- No API key required, developer-friendly and reliable in all environments.
+- Dynamic registration, integrated seamlessly into the tools registry with: `func init() { Register(ToolExchangeRate{}) }`
+- Structured schema validation which ensures that the model provides correct parameters:
+```json
+{
+  "base": "EUR",
+  "symbol": "USD",
+  "amount": 100
+}
+```
+- Context-aware logging, every request and provider response is logged clearly.
+- Automatic handling of both simple rate queries and full conversions with an optional amount field.
+
+### Implementation
+
+The tool implements the Tool interface in [`internal/tools/exchange_rate.go`](internal/tools/exchange_rate.go):
+
+```go
+type ToolExchangeRate struct{}
+
+func (ToolExchangeRate) Name() string { return "get_exchange_rate" }
+
+func (ToolExchangeRate) Description() string {
+    return "Get the latest FX rate or convert an amount between two currencies (ISO 4217 codes, e.g., EUR, USD). Powered by frankfurter.app, no API key required."
+}
+
+func (ToolExchangeRate) ParametersSchema() map[string]any {
+    return map[string]any{
+        "type": "object",
+        "properties": map[string]any{
+            "base":   map[string]any{"type": "string", "description": "Base currency, e.g., EUR"},
+            "symbol": map[string]any{"type": "string", "description": "Target currency, e.g., USD"},
+            "amount": map[string]any{"type": "number", "description": "Optional amount to convert"},
+        },
+        "required": []string{"base", "symbol"},
+    }
+}
+```
+
+The Call method validates parameters, performs an HTTP request to Frankfurter, parses the JSON response, and returns a compact JSON result:
+
+```go
+u := fmt.Sprintf("https://api.frankfurter.app/latest?from=%s&to=%s", base, symbol)
+slog.InfoContext(ctx, "FX request", "base", base, "symbol", symbol, "url", u)
+
+resp, err := http.Get(u)
+...
+out := map[string]any{
+    "provider": "frankfurter.app",
+    "base":     base,
+    "symbol":   symbol,
+    "rate":     rate,
+    "date":     date,
+}
+if amount > 0 {
+    out["amount"] = amount
+    out["converted"] = amount * rate
+}
+```
+
+The tool is automatically discovered and loaded at server startup by the registry system in [`internal/tools/registry.go`](internal/tools/registry.go), which logs each registration:
+
+```go
+for _, t := range tools.AllTools() {
+    slog.Info("Tool registered", "name", t.Name(), "desc", t.Description())
+}
+````
+
+### Result
+The server is able to register the tool and call it. The tool is able to provide a correct exchange rate.
+
+```text
+2025/11/16 21:28:12 INFO Tools registered count=5
+2025/11/16 21:28:12 INFO Tool registered name=get_current_weather desc="Get current weather for a given location. Returns temperature, wind, humidity, condition, etc."
+2025/11/16 21:28:12 INFO Tool registered name=get_exchange_rate desc="Get the latest FX rate or convert an amount between two currencies (ISO 4217 codes, e.g., EUR, USD). Powered by frankfurter.app, no API key required."
+2025/11/16 21:28:12 INFO Tool registered name=get_holidays desc="Gets local bank and public holidays. Each line is 'YYYY-MM-DD: Holiday Name'."
+2025/11/16 21:28:12 INFO Tool registered name=get_today_date desc="Get today's date and time in RFC3339 format."
+2025/11/16 21:28:12 INFO Tool registered name=get_weather_forecast desc="Provides a multi-day weather forecast (up to 7 days) for a given location."
+2025/11/16 21:28:12 INFO Starting the server...
+2025/11/16 21:28:42 INFO Generating reply for conversation conversation_id=691a33fa19ed891738fac783
+2025/11/16 21:28:42 INFO Generating title for conversation conversation_id=691a33fa19ed891738fac783
+2025/11/16 21:28:42 INFO Tool call received name=get_exchange_rate args="{\"amount\":100,\"base\":\"EUR\",\"symbol\":\"THB\"}"
+2025/11/16 21:28:42 INFO FX request base=EUR symbol=THB url="https://api.frankfurter.app/latest?from=EUR&to=THB"
+2025/11/16 21:28:43 INFO FX provider OK provider=frankfurter.app base=EUR symbol=THB rate=37.74 date=2025-11-14
+2025/11/16 21:28:43 INFO HTTP request complete http_method=POST http_path=/twirp/acai.chat.ChatService/StartConversation http_status=200
+```
+
+The assistant gives the infotmation to thje user as it should:
+
+```text
+Starting a new conversation, type your message below.
+
+USER:
+I want to know how mutch is 100 euros in thailand
+
+New conversation started:
+ID: 691a33fa19ed891738fac783
+Title: Euro to Thai Baht Exchange Rate
+
+ASSISTANT:
+100 euros is approximately 3,774 Thai Baht (THB) at the current exchange rate.
+```
+
 ## Task 4
 
 
