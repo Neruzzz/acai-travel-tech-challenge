@@ -4,9 +4,9 @@ import (
 	"context"
 	"testing"
 
-	"github.com/acai-travel/tech-challenge/internal/chat/model"
-	. "github.com/acai-travel/tech-challenge/internal/chat/testing"
-	"github.com/acai-travel/tech-challenge/internal/pb"
+	"github.com/Neruzzz/acai-travel-challenge/internal/chat/model"
+	. "github.com/Neruzzz/acai-travel-challenge/internal/chat/testing"
+	"github.com/Neruzzz/acai-travel-challenge/internal/pb"
 	"github.com/google/go-cmp/cmp"
 	"github.com/twitchtv/twirp"
 	"google.golang.org/protobuf/testing/protocmp"
