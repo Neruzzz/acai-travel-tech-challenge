@@ -6,8 +6,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/acai-travel/tech-challenge/internal/chat/model"
-	"github.com/acai-travel/tech-challenge/internal/pb"
+	"github.com/Neruzzz/acai-travel-challenge/internal/chat/model"
+	"github.com/Neruzzz/acai-travel-challenge/internal/pb"
 	"github.com/twitchtv/twirp"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 )
@@ -83,7 +83,6 @@ func (s *Server) StartConversation(ctx context.Context, req *pb.StartConversatio
 	reply := replyResult.val
 
 	conversation.Title = title
-
 
 	conversation.Messages = append(conversation.Messages, &model.Message{
 		ID:        primitive.NewObjectID(),

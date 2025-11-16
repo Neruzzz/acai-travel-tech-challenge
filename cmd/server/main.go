@@ -5,12 +5,12 @@ import (
 	"log/slog"
 	"net/http"
 
-	"github.com/acai-travel/tech-challenge/internal/chat"
-	"github.com/acai-travel/tech-challenge/internal/chat/assistant"
-	"github.com/acai-travel/tech-challenge/internal/chat/model"
-	"github.com/acai-travel/tech-challenge/internal/httpx"
-	"github.com/acai-travel/tech-challenge/internal/mongox"
-	"github.com/acai-travel/tech-challenge/internal/pb"
+	"github.com/Neruzzz/acai-travel-challenge/internal/chat"
+	"github.com/Neruzzz/acai-travel-challenge/internal/chat/assistant"
+	"github.com/Neruzzz/acai-travel-challenge/internal/chat/model"
+	"github.com/Neruzzz/acai-travel-challenge/internal/httpx"
+	"github.com/Neruzzz/acai-travel-challenge/internal/mongox"
+	"github.com/Neruzzz/acai-travel-challenge/internal/pb"
 	"github.com/gorilla/mux"
 	"github.com/twitchtv/twirp"
 )

@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/acai-travel/tech-challenge/internal/chat/model"
+	"github.com/Neruzzz/acai-travel-challenge/internal/chat/model"
 	"github.com/google/uuid"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 )
