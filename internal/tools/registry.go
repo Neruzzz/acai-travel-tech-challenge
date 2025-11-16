@@ -2,27 +2,27 @@ package tools
 
 import "context"
 
-// Tool define el contrato mínimo que expone cada herramienta.
+// Contract common to all tools.
 type Tool interface {
-	Name() string                                                  // nombre exacto que verá el modelo (p. ej., "get_weather")
-	Description() string                                           // descripción breve para el modelo
-	ParametersSchema() map[string]any                              // JSON schema (object) de parámetros
-	Call(ctx context.Context, args map[string]any) (string, error) // ejecución
+	Name() string
+	Description() string
+	ParametersSchema() map[string]any
+	Call(ctx context.Context, args map[string]any) (string, error)
 }
 
 var registry []Tool
 
-// Register lo llamas en init() de cada tool.
+// Register adds a tool to the registry.
 func Register(t Tool) {
 	registry = append(registry, t)
 }
 
-// AllTools devuelve todas las tools registradas.
+// AllTools returns all registered tools.
 func AllTools() []Tool {
 	return registry
 }
 
-// FindByName busca una tool ya registrada por su nombre.
+// FindByName searches a tool by its name in the registry.
 func FindByName(name string) Tool {
 	for _, t := range registry {
 		if t.Name() == name {

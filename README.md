@@ -641,6 +641,249 @@ Expect rain the next two days, with improving weather and sunshine on the third 
 
 ## Task 3
 
+### Problem
+
+Originally, all tools were hard-coded and coupled to the `assistant.go` file. This led to several issues:
+
+- There was no common contract, each tool had different signatures and inconsistent schemas which had to be defined on the main logic of the assistant.
+- Adding or modifying tools required editing assistant.go, increasing the risk of regressions and low scalability.
+- There was no dynamic discovery, if a tool wasn’t manually wired, the assistant silently ignored it.
+- No structured logging made it hard to debug when a tool was called or failed.
+
+### Solution
+
+Key dessign decissions:
+
+- Define a unified Tool interface shared by every tool.
+- Introduce a registry to dynamically register and discover available tools.
+- Split each tool into its own file inside `internal/tools/` for modularity.
+- Make `assistant.go` responsible only for:
+    - Dynamically exposing tools to the model.
+    - Routing tool calls.
+    - Handling execution results.
+- Improve observability with logs.
+
+### Implementation
+
+#### Tool Structure
+
+All tools now implement the following interface (in [`internal/tools/registry.go`](internal/tools/registry.go)):
+
+```go
+type Tool interface {
+    Name() string
+    Description() string
+    ParametersSchema() map[string]any
+    Call(ctx context.Context, args map[string]any) (string, error)
+}
+```
+
+- `Name()`: exact tool identifier (must match what the model will call).
+
+- `Description()`: short text explaining the tool’s purpose.
+
+- `ParametersSchema()`: JSON Schema describing accepted arguments. This allows OpenAI to validate and auto-generate correct calls.
+
+- `Call()`: executes the logic, receives parsed args, and returns a string (usually JSON).
+
+Each tool registers itself automatically via `init()`:
+
+```go
+func init() {
+    Register(ToolCurrentWeather{})
+}
+```
+
+Example `internal/tools/current_weather.go`:
+
+```go
+type ToolCurrentWeather struct{}
+
+func (ToolCurrentWeather) Name() string { return "get_current_weather" }
+
+func (ToolCurrentWeather) Description() string {
+    return "Get current weather for a given location."
+}
+
+func (ToolCurrentWeather) ParametersSchema() map[string]any {
+    return map[string]any{
+        "type": "object",
+        "properties": map[string]any{
+            "location": map[string]any{
+                "type": "string",
+                "description": "City name or coordinates.",
+            },
+        },
+        "required": []string{"location"},
+    }
+}
+
+func (ToolCurrentWeather) Call(ctx context.Context, args map[string]any) (string, error) {
+    loc, _ := args["location"].(string)
+    if loc == "" {
+        return "", errors.New("missing 'location'")
+    }
+    // Fetch data, format output...
+    return `{"location": "Barcelona", "temp_c": 21.4}`, nil // Example output
+}
+
+func init() { Register(ToolCurrentWeather{}) } // init for registering the tool
+
+```
+
+#### The role of `registry.go`
+
+[`internal/tools/registry.go`](internal/tools/registry.go) is a lightweight global registry that tracks all available tools:
+
+```go
+package tools
+
+import "context"
+
+// Contract common to all tools.
+type Tool interface {
+	Name() string
+	Description() string
+	ParametersSchema() map[string]any
+	Call(ctx context.Context, args map[string]any) (string, error)
+}
+
+var registry []Tool
+
+// Register adds a tool to the registry.
+func Register(t Tool) {
+	registry = append(registry, t)
+}
+
+// AllTools returns all registered tools.
+func AllTools() []Tool {
+	return registry
+}
+
+// FindByName searches a tool by its name in the registry.
+func FindByName(name string) Tool {
+	for _, t := range registry {
+		if t.Name() == name {
+			return t
+		}
+	}
+	return nil
+}
+```
+
+Responsibilities:
+
+- Provides a single source of truth for all registered tools.
+- Makes tools discoverable dynamically (no hardcoding) and scalable.
+- Enables the assistant to build its list of available tools and to route calls by name.
+
+Design justification:
+
+- Keeps the assistant core agnostic of how many or which tools exist.
+- Adding a new tool becomes a single, isolated action (create file + `init()` registration).
+- Prevents repetitive switch/case logic in assistant.go which is not scalable.
+- Encourages loose coupling and open/closed design, new tools don’t require code changes elsewhere.
+
+#### Changes in `assistant.go`
+
+##### 1. Dynamic tool exposure
+
+Instead of manually listing tools, the assistant now builds them dynamically from the registry:
+
+```go
+// Collect tools from registry
+var toolDefs []openai.ChatCompletionToolUnionParam
+for _, t := range tools.AllTools() {
+    toolDefs = append(toolDefs, openai.ChatCompletionFunctionTool(openai.FunctionDefinitionParam{
+        Name:        t.Name(),
+        Description: openai.String(t.Description()),
+        Parameters:  t.ParametersSchema(),
+    }))
+}
+```
+
+This list is passed to OpenAI when creating a new completion, ensuring the model knows exactly which tools it can use.
+
+##### 2. Routing tool calls
+
+When the model calls a tool, the assistant looks it up in the registry and executes it:
+
+```go
+for _, call := range choice.Message.ToolCalls {
+    slog.InfoContext(ctx, "Tool call received",
+        "name", call.Function.Name,
+        "args", call.Function.Arguments,
+    )
+
+    tool := tools.FindByName(call.Function.Name)
+    if tool == nil {
+        slog.ErrorContext(ctx, "tool not found", "name", call.Function.Name)
+        msgs = append(msgs, openai.ToolMessage("ERROR: tool not found", call.ID))
+        continue
+    }
+
+    var args map[string]any
+    if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err != nil {
+        slog.ErrorContext(ctx, "invalid args", "name", call.Function.Name, "err", err)
+        msgs = append(msgs, openai.ToolMessage("ERROR: invalid tool arguments", call.ID))
+        continue
+    }
+
+    res, err := tool.Call(ctx, args)
+    if err != nil {
+        slog.ErrorContext(ctx, "tool error", "name", call.Function.Name, "err", err)
+        msgs = append(msgs, openai.ToolMessage(fmt.Sprintf("ERROR: %v", err), call.ID))
+        continue
+    }
+
+    slog.InfoContext(ctx, "tool result", "name", call.Function.Name, "bytes", len(res))
+    msgs = append(msgs, openai.ToolMessage(res, call.ID))
+}
+```
+
+##### 3. Startup logging
+
+On server startup, the assistant now automatically lists all registered tools from the central registry:
+
+```go
+func New() *Assistant {
+    a := &Assistant{cli: openai.NewClient()}
+
+    ts := tools.AllTools()
+    if len(ts) == 0 {
+        slog.Warn("No tools registered!")
+    } else {
+        slog.Info("Tools registered", "count", len(ts))
+        for _, t := range ts {
+            slog.Info("Tool registered", "name", t.Name(), "desc", t.Description())
+        }
+    }
+    return a
+}
+```
+
+This confirms that the assistant successfully loaded all tools before runtime. This is an example of the output:
+
+```text
+2025/11/16 20:48:13 INFO Tools registered count=4
+2025/11/16 20:48:13 INFO Tool registered name=get_current_weather desc="Get current weather for a given location. Returns temperature, wind, humidity, condition, etc."
+2025/11/16 20:48:13 INFO Tool registered name=get_holidays desc="Gets local bank and public holidays. Each line is 'YYYY-MM-DD: Holiday Name'."
+2025/11/16 20:48:13 INFO Tool registered name=get_today_date desc="Get today's date and time in RFC3339 format."
+2025/11/16 20:48:13 INFO Tool registered name=get_weather_forecast desc="Provides a multi-day weather forecast (up to 7 days) for a given location."
+2025/11/16 20:48:13 INFO Starting the server...
+2025/11/16 20:50:38 INFO Generating title for conversation conversation_id=691a2b0ea434c04ef8584406
+2025/11/16 20:50:38 INFO Generating reply for conversation conversation_id=691a2b0ea434c04ef8584406
+2025/11/16 20:50:40 INFO Tool call received name=get_today_date args={}
+2025/11/16 20:50:41 INFO HTTP request complete http_method=POST http_path=/twirp/acai.chat.ChatService/StartConversation http_status=200
+```
+
+### Result
+
+After the refactor:
+
+- All tools (`get_today_date`, `get_holidays`, `get_current_weather`, `get_weather_forecast`, etc.) are automatically discovered and callable.
+- The assistant’s logic is cleaner, more robust, and easier to extend.
+- Adding a new capability now takes one new file + one `init()` line, without touching any shared logic.
 
 ## Task 4
 
