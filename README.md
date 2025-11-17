@@ -1006,8 +1006,135 @@ ASSISTANT:
 100 euros is approximately 3,774 Thai Baht (THB) at the current exchange rate.
 ```
 
-## Task 4
 
+## Task 4 – Create a test for StartConversation API
+### Problem
+
+We needed an automated test to ensure the `StartConversation` endpoint:
+
+- Creates a new conversation (with ID and persisted state),
+- Populates the title, and
+- Triggers the assistant’s reply.
+
+### Solution
+
+- Introduced a fake assistant that implements the Assistant interface (Title, Reply) and returns predetermined strings. This makes `StartConversation` tests fast and stable.
+
+- Wrote a new test in internal/chat/server_test.go that:
+    - Calls StartConversation,
+    - Asserts ID, title, and reply on the response,
+    - Reads the conversation back via DescribeConversation to assert persistence and message roles (user/assistant).
+- Added a negative test for empty message (expecting twirp.InvalidArgument).
+- Kept the original DescribeConversation tests (existing behavior and 404).
+
+### Implementation
+
+Files & structure:
+
+```text
+internal/
+  chat/
+    server.go
+    server_test.go        # StartConversation tests + existing DescribeConversation tests
+    assistant/
+      title_test.go       # Bonus: unit/integration tests for Assistant.Title
+    testing/
+      fixture.go          # Fixtures & helpers (unchanged)
+      mongo.go            # Mongo helpers (unchanged)
+
+```
+
+The test is implemented in [`internal/chat/server_test.go`](internal/chat/server_test.go)
+
+- Uses the project’s helpers: ConnectMongo, WithFixture, twirp.
+- Adds:
+    1. `TestServer_StartConversation_Creates_Populates_Triggers`
+        - Asserts response (`ConversationId`, `Title`, `Reply`).
+        - Calls `DescribeConversation` to verify title persisted and two messages exist with correct roles (`pb.Conversation_USER`, `pb.Conversation_ASSISTANT`) and assistant content.
+    2. `TestServer_StartConversation_EmptyMessage_Err`
+        - Asserts `twirp.InvalidArgument` for empty input.
+- Keeps:
+    3. `TestServer_DescribeConversation` (existing success + 404 cases).
+
+### Result
+
+How to run:
+
+```bash
+make up                 # start MongoDB for server tests
+go test ./internal/chat -v
+```
+
+The output of the test is the following (all tests passed):
+
+```text
+trioteca:tech-challenge neruzz$ go test ./internal/chat -v
+=== RUN   TestServer_StartConversation_Creates_Populates_Triggers
+=== RUN   TestServer_StartConversation_Creates_Populates_Triggers/creates_conversation,_sets_title,_triggers_assistant_reply
+--- PASS: TestServer_StartConversation_Creates_Populates_Triggers (0.03s)
+    --- PASS: TestServer_StartConversation_Creates_Populates_Triggers/creates_conversation,_sets_title,_triggers_assistant_reply (0.03s)
+=== RUN   TestServer_StartConversation_EmptyMessage_Err
+=== RUN   TestServer_StartConversation_EmptyMessage_Err/empty_message_should_return_InvalidArgument
+--- PASS: TestServer_StartConversation_EmptyMessage_Err (0.00s)
+    --- PASS: TestServer_StartConversation_EmptyMessage_Err/empty_message_should_return_InvalidArgument (0.00s)
+=== RUN   TestServer_DescribeConversation
+=== RUN   TestServer_DescribeConversation/describe_existing_conversation
+=== RUN   TestServer_DescribeConversation/describe_non_existing_conversation_should_return_404
+--- PASS: TestServer_DescribeConversation (0.00s)
+    --- PASS: TestServer_DescribeConversation/describe_existing_conversation (0.00s)
+    --- PASS: TestServer_DescribeConversation/describe_non_existing_conversation_should_return_404 (0.00s)
+PASS
+ok      github.com/Neruzzz/acai-travel-challenge/internal/chat  0.408s
+```
+
+## Task 4 – Bonus: Tests for assistant.Title
+### Problem
+
+We need to develop a test for Assistant.Title (in `internal/chat/assistant/assistant.go`), without coupling to DB code or breaking local runs when OPENAI_API_KEY is absent.
+
+### Solution
+
+- Added a unit test for local logic (fallback when the conversation is empty).
+- Added an optional integration test that calls the real model only if OPENAI_API_KEY is set; otherwise it skips.
+
+### Implementation
+
+The test is implemented in [`internal/chat/assistant/title_test.go`](internal/chat/assistant/title_test.go):
+
+- Created:
+    1. TestTitle_EmptyConversation_Fallback
+        - No network, no DB. Asserts the function returns "An empty conversation" when there are no messages.
+    2. TestTitle_GeneratesConciseTitle_Integration
+        - Skips unless OPENAI_API_KEY is set.
+        - Asserts non-empty, short, cleaned title (no quotes/newlines, not a question mark, length ≤ 80).
+
+### Result
+
+To run the test:
+
+```bash
+make up
+go test ./internal/chat/assistant -v
+```
+
+The result of the test is below:
+
+```text
+trioteca:tech-challenge neruzz$ go test ./internal/chat/assistant -v
+=== RUN   TestTitle_EmptyConversation_Fallback
+2025/11/17 18:30:19 INFO Tools registered count=5
+2025/11/17 18:30:19 INFO Tool registered name=get_current_weather desc="Get current weather for a given location. Returns temperature, wind, humidity, condition, etc."
+2025/11/17 18:30:19 INFO Tool registered name=get_exchange_rate desc="Get the latest FX rate or convert an amount between two currencies (ISO 4217 codes, e.g., EUR, USD). Powered by frankfurter.app, no API key required."
+2025/11/17 18:30:19 INFO Tool registered name=get_holidays desc="Gets local bank and public holidays. Each line is 'YYYY-MM-DD: Holiday Name'."
+2025/11/17 18:30:19 INFO Tool registered name=get_today_date desc="Get today's date and time in RFC3339 format."
+2025/11/17 18:30:19 INFO Tool registered name=get_weather_forecast desc="Provides a multi-day weather forecast (up to 7 days) for a given location."
+--- PASS: TestTitle_EmptyConversation_Fallback (0.00s)
+=== RUN   TestTitle_GeneratesConciseTitle_Integration
+    title_test.go:29: skipping integration test: OPENAI_API_KEY not set
+--- SKIP: TestTitle_GeneratesConciseTitle_Integration (0.00s)
+PASS
+ok      github.com/Neruzzz/acai-travel-challenge/internal/chat/assistant        0.278s
+```
 
 ## Task 5
 
@@ -1017,3 +1144,4 @@ ASSISTANT:
 - ChatGPT 5 for coding and syntax.
 - WeatherAPI Documentation: https://www.weatherapi.com/docs/
 - For deeper understanding of syntax and primitives in Go: https://go.dev/doc/
+- Frankfurter API for exange rates tool: https://www.frankfurter.dev
