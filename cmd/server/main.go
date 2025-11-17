@@ -25,6 +25,7 @@ import (
 
 func main() {
 	ctx := context.Background()
+
 	shutdown, err := httpx.InitTelemetry(ctx, "acai-server")
 	if err != nil {
 		log.Fatalf("telemetry init error: %v", err)
